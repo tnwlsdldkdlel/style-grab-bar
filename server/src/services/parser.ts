@@ -765,6 +765,7 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
           paddingBottom: number;
           paddingLeft: number;
           display: string;
+          overflow: string;
           isContainer: boolean;
         }[] = [];
 
@@ -816,6 +817,7 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
           const zIndex = isNaN(zIndexRaw) ? 0 : zIndexRaw;
 
           const hasChildren = el.children.length > 0;
+          const overflow = style.overflow;
 
           elements.push({
             id,
@@ -842,6 +844,7 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
             paddingBottom: parseFloat(style.paddingBottom) || 0,
             paddingLeft: parseFloat(style.paddingLeft) || 0,
             display: style.display,
+            overflow: overflow,
             isContainer: hasChildren,
           });
 

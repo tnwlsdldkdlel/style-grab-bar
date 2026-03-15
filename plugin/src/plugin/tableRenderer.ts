@@ -459,6 +459,9 @@ function applyBoxStyle(frame: FrameNode, el: LayoutElement): void {
   if (el.borderRadius > 0) {
     frame.cornerRadius = el.borderRadius;
   }
+  // overflow: hidden/clip/scroll/auto인 경우만 클리핑, 나머지는 visible
+  var ov = el.overflow || "visible";
+  frame.clipsContent = (ov === "hidden" || ov === "clip" || ov === "scroll" || ov === "auto");
 }
 
 function placeInParent(
@@ -468,17 +471,11 @@ function placeInParent(
   nodeMap: Record<number, FrameNode>,
   rootFrame: FrameNode
 ): void {
-  var parentNode = el.parentId !== null ? nodeMap[el.parentId] : null;
-  if (parentNode) {
-    var parentEl = el.parentId !== null ? elementMap[el.parentId] : null;
-    node.x = el.x - (parentEl ? parentEl.x : 0);
-    node.y = el.y - (parentEl ? parentEl.y : 0);
-    parentNode.appendChild(node);
-  } else {
-    node.x = el.x;
-    node.y = el.y;
-    rootFrame.appendChild(node);
-  }
+  // 플랫 렌더링: 모든 요소를 rootFrame에 절대좌표로 배치
+  // 웹의 getBoundingClientRect() 좌표를 그대로 사용하여 캡처 이미지와 일치시킴
+  node.x = el.x;
+  node.y = el.y;
+  rootFrame.appendChild(node);
   nodeMap[el.id] = node;
 }
 
@@ -2717,6 +2714,7 @@ export async function renderLayout(results: ExtractResult[]) {
         textFrame.name = el.tag + " (text)";
         textFrame.layoutMode = "NONE" as any;
         textFrame.resize(Math.max(el.width, 1), Math.max(el.height, 1));
+        textFrame.clipsContent = false;
         applyBoxStyle(textFrame, el);
 
         // 텍스트 노드 생성
@@ -2768,6 +2766,7 @@ export async function renderLayout(results: ExtractResult[]) {
         imgFrame.name = "img";
         imgFrame.layoutMode = "NONE" as any;
         imgFrame.resize(Math.max(el.width, 1), Math.max(el.height, 1));
+        imgFrame.clipsContent = true;
         if (el.borderRadius > 0) imgFrame.cornerRadius = el.borderRadius;
 
         if (el.imageData) {
@@ -2798,6 +2797,25 @@ export async function renderLayout(results: ExtractResult[]) {
         }
 
         placeInParent(imgFrame, el, elementMap, nodeMap, rootFrame);
+      }
+    }
+
+    // z-index 기반 레이어 순서 정렬 (플랫 구조: 모두 rootFrame 자식)
+    // z-index가 높은 요소가 Figma에서 위로 올라감 (나중에 삽입 = 위에 표시)
+    var sortedElements: { id: number; zIndex: number; domOrder: number }[] = [];
+    for (var i = 0; i < elements.length; i++) {
+      if (nodeMap[elements[i].id]) {
+        sortedElements.push({ id: elements[i].id, zIndex: elements[i].zIndex, domOrder: i });
+      }
+    }
+    sortedElements.sort(function (a, b) {
+      if (a.zIndex !== b.zIndex) return a.zIndex - b.zIndex;
+      return a.domOrder - b.domOrder;
+    });
+    for (var si = 0; si < sortedElements.length; si++) {
+      var sNode = nodeMap[sortedElements[si].id];
+      if (sNode && sNode.parent === rootFrame) {
+        rootFrame.insertChild(si, sNode);
       }
     }
 

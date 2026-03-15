@@ -58,3 +58,7 @@ This is the largest file. It builds Auto Layout frames in Figma:
 - `server/src/services/fetcher.ts` is a placeholder — Puppeteer handles page loading directly in `parser.ts`
 - The parser extracts styles from a fixed set of HTML element selectors (h1-h6, p, span, a, li, etc.) and deduplicates by computed style signature
 - 15-second timeout per page load
+
+## Git
+
+- 커밋 메시지에 `Co-Authored-By` 줄을 추가하지 않는다

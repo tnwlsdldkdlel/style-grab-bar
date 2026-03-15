@@ -116,6 +116,7 @@ export interface LayoutElement {
   paddingBottom: number;
   paddingLeft: number;
   display: string;
+  overflow: string;
   isContainer: boolean;
   imageData?: string;
 }
