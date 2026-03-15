@@ -1,0 +1,10 @@
+{
+  "name": "StyleGrabber",
+  "id": "stylegrabber-plugin",
+  "api": "1.0.0",
+  "main": "dist/controller.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "editorType": ["figma"],
+  "ui": "dist/ui.html"
+}

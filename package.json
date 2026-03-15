@@ -1,0 +1,15 @@
+{
+  "name": "stylegrabber",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "plugin",
+    "server"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace=server",
+    "dev:plugin": "npm run dev --workspace=plugin",
+    "build:server": "npm run build --workspace=server",
+    "build:plugin": "npm run build --workspace=plugin"
+  }
+}
