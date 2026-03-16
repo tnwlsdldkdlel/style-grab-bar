@@ -357,3 +357,42 @@ Phase 0 (세팅) → Phase 1 (서버) → Phase 2 (UI) → Phase 3 (렌더링) �
 - [x] 각 오버레이에 셀렉터 라벨(예: "h1", "button") 표기
 - [x] 의미 그룹별 색상 구분 (heading=파랑, body=초록, interactive=보라 등)
 - [x] 범례(Legend) 행으로 색상-그룹 매핑 표시
+
+---
+
+## 12. 레이아웃 재구성 정확도 개선 (Layout Fidelity)
+
+캡처 이미지와 레이아웃 재구성 결과의 시각적 차이를 줄이기 위한 개선 작업.
+
+### Phase 22: 레이아웃 렌더링 기반 개선 ✅
+
+- [x] 플랫 렌더링: 모든 요소를 rootFrame에 절대좌표로 직접 배치 (중첩 좌표 오차 제거)
+- [x] CSS `overflow` 속성 추출 및 Figma `clipsContent` 반영
+- [x] z-index 기반 Figma 레이어 순서 정렬
+- [x] 뷰포트(1280px) 밖 요소 필터링 + rootFrame 폭 고정
+
+### Phase 23: 누락 시각 요소 복원
+
+CSS background-image, SVG, box-shadow 등 현재 추출하지 못하는 시각 요소를 복원하여 캡처 이미지와의 차이를 최소화한다.
+
+**P0 — CSS `background-image` 캡처** ✅
+- [x] 서버: `backgroundImage` 값이 있는 요소 식별 (URL 또는 gradient)
+- [x] `LayoutElement`에 `hasBackgroundImage` 플래그 추가
+- [x] background-image가 있는 요소를 `<img>`와 동일하게 Puppeteer `element.screenshot()`으로 캡처
+- [x] 플러그인: 캡처된 이미지를 Figma IMAGE fill로 적용
+
+**P1 — SVG 요소 캡처** ✅
+- [x] 서버: `<svg>` 태그 요소를 식별하고 Puppeteer screenshot으로 캡처
+- [x] 플러그인: SVG 캡처 이미지를 Figma IMAGE fill로 적용 (컨테이너 imageData 처리와 통합)
+
+**P2 — `box-shadow` 추출** ✅
+- [x] 서버: `boxShadow` computed style 추출
+- [x] `LayoutElement`에 `boxShadow` 필드 추가
+- [x] 플러그인: CSS box-shadow 파싱 → Figma `effects` (DROP_SHADOW) 변환 적용
+- [x] 여러 그림자 지원 (쉼표 분리), inset 그림자 건너뜀, spread 값 반영
+
+**P3 — CSS gradient → Figma gradient** ✅
+- [x] 서버: `backgroundImage`에서 gradient 문자열 추출, `gradient` 필드로 전달
+- [x] 플러그인: `parseLinearGradient()` — CSS linear-gradient를 Figma GradientPaint로 변환
+- [x] 각도 → gradientTransform 매트릭스 변환, 색상 stop 파싱 (hex + rgba 지원)
+- [x] imageData 캡처가 없는 경우 fallback으로 Figma 네이티브 gradient 적용

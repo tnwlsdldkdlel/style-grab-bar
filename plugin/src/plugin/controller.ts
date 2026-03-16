@@ -1,4 +1,4 @@
-import { renderTables, renderCleanedTables, renderCaptureForSession, renderLayout } from "./tableRenderer";
+import { renderTables, renderCleanedTables, renderCaptureForSession, renderLayout, renderAILayout } from "./tableRenderer";
 import type { PluginMessage, ExtractResult } from "../types";
 
 figma.showUI(__html__, { width: 420, height: 520 });
@@ -30,12 +30,15 @@ figma.ui.onmessage = async (msg: any) => {
     var failCount = results.length - successCount;
 
     var layoutMode = msg.layoutMode || false;
+    var aiLayoutMode = msg.aiLayoutMode || false;
 
-    console.log("[StyleGrabber] successCount:", successCount, "layoutMode:", layoutMode, "cleanedOnly:", cleanedOnly);
+    console.log("[StyleGrabber] successCount:", successCount, "layoutMode:", layoutMode, "aiLayoutMode:", aiLayoutMode, "cleanedOnly:", cleanedOnly);
 
     if (successCount > 0) {
       try {
-        if (layoutMode) {
+        if (aiLayoutMode) {
+          await renderAILayout(results);
+        } else if (layoutMode) {
           await renderLayout(results);
         } else if (cleanedOnly) {
           await renderCleanedTables(results);

@@ -446,8 +446,100 @@ function createColorSwatchRow(style: TypographyStyle, registeredPaintStyle?: Pai
 
 // ── Layout 렌더러 공유 헬퍼 ──
 
+// CSS linear-gradient를 Figma GradientPaint로 파싱
+function parseLinearGradient(css: string): GradientPaint | null {
+  // linear-gradient(135deg, #667eea 0%, #764ba2 100%)
+  var inner = css.match(/linear-gradient\(([^)]+(?:\([^)]*\)[^)]*)*)\)/);
+  if (!inner) return null;
+
+  var parts = inner[1];
+  // 각도 파싱
+  var angleMatch = parts.match(/^([\d.]+)deg/);
+  var angle = angleMatch ? parseFloat(angleMatch[1]) : 180;
+
+  // 색상 stop 파싱
+  var stopRegex = /(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s*([\d.]+%)?/g;
+  var match: RegExpExecArray | null;
+  var stops: ColorStop[] = [];
+  while ((match = stopRegex.exec(parts)) !== null) {
+    var colorStr = match[1];
+    var pos = match[2] ? parseFloat(match[2]) / 100 : -1;
+    var rgb: RGB;
+    if (colorStr.charAt(0) === "#") {
+      rgb = hexToRgb(colorStr);
+    } else {
+      var rgbaM = colorStr.match(/\d+/g);
+      if (!rgbaM || rgbaM.length < 3) continue;
+      rgb = { r: parseInt(rgbaM[0]) / 255, g: parseInt(rgbaM[1]) / 255, b: parseInt(rgbaM[2]) / 255 };
+    }
+    stops.push({ position: pos, color: { r: rgb.r, g: rgb.g, b: rgb.b, a: 1 } });
+  }
+
+  if (stops.length < 2) return null;
+
+  // 위치가 지정 안 된 stop에 균등 분배
+  for (var i = 0; i < stops.length; i++) {
+    if (stops[i].position < 0) {
+      stops[i].position = i / (stops.length - 1);
+    }
+  }
+
+  // 각도 → Figma gradient transform (시작점/끝점)
+  var rad = (angle - 90) * Math.PI / 180;
+  var cos = Math.cos(rad);
+  var sin = Math.sin(rad);
+
+  return {
+    type: "GRADIENT_LINEAR",
+    gradientTransform: [
+      [cos, sin, 0.5 - cos * 0.5 - sin * 0.5],
+      [-sin, cos, 0.5 + sin * 0.5 - cos * 0.5]
+    ],
+    gradientStops: stops,
+  } as GradientPaint;
+}
+
+// CSS box-shadow 문자열을 Figma DropShadowEffect로 파싱
+function parseBoxShadow(shadow: string): DropShadowEffect | null {
+  // "rgba(0, 0, 0, 0.1) 0px 4px 6px -1px" 또는 "0px 4px 6px -1px rgba(0,0,0,0.1)" 등
+  var rgbaMatch = shadow.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/);
+  var numsStr = shadow.replace(/rgba?\([^)]+\)/g, "").trim();
+  var nums = numsStr.match(/-?[\d.]+/g);
+  if (!nums || nums.length < 2) return null;
+
+  var offsetX = parseFloat(nums[0]) || 0;
+  var offsetY = parseFloat(nums[1]) || 0;
+  var blur = parseFloat(nums[2]) || 0;
+  // nums[3]은 spread — Figma에서 spread 지원
+
+  var r = rgbaMatch ? parseInt(rgbaMatch[1]) / 255 : 0;
+  var g = rgbaMatch ? parseInt(rgbaMatch[2]) / 255 : 0;
+  var b = rgbaMatch ? parseInt(rgbaMatch[3]) / 255 : 0;
+  var a = rgbaMatch && rgbaMatch[4] !== undefined ? parseFloat(rgbaMatch[4]) : 1;
+
+  return {
+    type: "DROP_SHADOW",
+    color: { r: r, g: g, b: b, a: a },
+    offset: { x: offsetX, y: offsetY },
+    radius: blur,
+    spread: nums[3] ? parseFloat(nums[3]) : 0,
+    visible: true,
+    blendMode: "NORMAL",
+  } as DropShadowEffect;
+}
+
 function applyBoxStyle(frame: FrameNode, el: LayoutElement): void {
-  if (el.backgroundColor) {
+  if (el.gradient && !el.imageData) {
+    // gradient가 있고 스크린샷 캡처가 없는 경우 Figma gradient로 변환
+    var grad = parseLinearGradient(el.gradient);
+    if (grad) {
+      frame.fills = [grad];
+    } else if (el.backgroundColor) {
+      frame.fills = [{ type: "SOLID", color: hexToRgb(el.backgroundColor) }];
+    } else {
+      frame.fills = [];
+    }
+  } else if (el.backgroundColor) {
     frame.fills = [{ type: "SOLID", color: hexToRgb(el.backgroundColor) }];
   } else {
     frame.fills = [];
@@ -458,6 +550,19 @@ function applyBoxStyle(frame: FrameNode, el: LayoutElement): void {
   }
   if (el.borderRadius > 0) {
     frame.cornerRadius = el.borderRadius;
+  }
+  // box-shadow → Figma DROP_SHADOW
+  if (el.boxShadow) {
+    // 여러 그림자 분리 (쉼표로 구분되지만 rgba 내부 쉼표 제외)
+    var shadows = el.boxShadow.split(/,(?![^(]*\))/);
+    var effects: Effect[] = [];
+    for (var si = 0; si < shadows.length; si++) {
+      var trimmed = shadows[si].trim();
+      if (trimmed.indexOf("inset") !== -1) continue; // inset 그림자 건너뜀
+      var effect = parseBoxShadow(trimmed);
+      if (effect) effects.push(effect);
+    }
+    if (effects.length > 0) frame.effects = effects;
   }
   // overflow: hidden/clip/scroll/auto인 경우만 클리핑, 나머지는 visible
   var ov = el.overflow || "visible";
@@ -2683,17 +2788,14 @@ export async function renderLayout(results: ExtractResult[]) {
     rootFrame.layoutMode = "NONE" as any;
     rootFrame.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
 
-    // 전체 페이지 크기 계산
-    var maxX = 1280;
+    // 전체 페이지 크기 계산 (폭은 뷰포트 1280px 고정)
     var maxY = 800;
     for (var i = 0; i < elements.length; i++) {
-      var el = elements[i];
-      var right = el.x + el.width;
-      var bottom = el.y + el.height;
-      if (right > maxX) maxX = right;
+      var bottom = elements[i].y + elements[i].height;
       if (bottom > maxY) maxY = bottom;
     }
-    rootFrame.resize(maxX, maxY);
+    rootFrame.resize(1280, maxY);
+    rootFrame.clipsContent = true;
     rootFrame.x = offsetX;
     rootFrame.y = 0;
 
@@ -2752,13 +2854,27 @@ export async function renderLayout(results: ExtractResult[]) {
         textFrame.appendChild(textNode);
         placeInParent(textFrame, el, elementMap, nodeMap, rootFrame);
 
-      } else if (el.isContainer || el.backgroundColor || (el.borderWidth > 0 && el.borderColor)) {
-        // 컨테이너 또는 시각적 요소
+      } else if (el.backgroundColor || (el.borderWidth > 0 && el.borderColor) || el.hasBackgroundImage || el.imageData || el.boxShadow || el.gradient) {
+        // 시각적 요소만 렌더링 (배경색, 테두리, 배경이미지, 캡처 이미지, 그림자, 그라데이션이 있는 경우)
         var frame = figma.createFrame();
         frame.name = el.tag;
         frame.layoutMode = "NONE" as any;
         frame.resize(Math.max(el.width, 1), Math.max(el.height, 1));
         applyBoxStyle(frame, el);
+
+        // background-image 캡처 데이터가 있으면 IMAGE fill 적용
+        if (el.imageData) {
+          try {
+            var bgImgBytes = figma.base64Decode(el.imageData);
+            var bgFigmaImage = figma.createImage(bgImgBytes);
+            frame.fills = [{
+              type: "IMAGE",
+              imageHash: bgFigmaImage.hash,
+              scaleMode: "FILL",
+            } as ImagePaint];
+          } catch (_) { /* 디코딩 실패 시 기존 스타일 유지 */ }
+        }
+
         placeInParent(frame, el, elementMap, nodeMap, rootFrame);
 
       } else if (el.tag === "img") {
@@ -2824,5 +2940,95 @@ export async function renderLayout(results: ExtractResult[]) {
 
   figma.viewport.scrollAndZoomIntoView(
     figma.currentPage.children.slice(-layoutResults.length)
+  );
+}
+
+// ── AI Layout 렌더러 (하이브리드: 스크린샷 배경 + 텍스트 오버레이) ──
+
+export async function renderAILayout(results: ExtractResult[]) {
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+  await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+  await figma.loadFontAsync({ family: "Inter", style: "Semi Bold" }).catch(() => {});
+
+  var aiResults = results.filter(function (r) {
+    return r.success && r.aiScreenshot;
+  });
+  if (aiResults.length === 0) return;
+
+  var offsetX = 0;
+
+  for (var ri = 0; ri < aiResults.length; ri++) {
+    var result = aiResults[ri];
+    var textElements = (result.aiElements || []).filter(function (e) { return e.kind === "text"; });
+    var pageW = result.pageWidth || 1280;
+    var pageH = result.pageHeight || 800;
+
+    // 루트 프레임 생성
+    var rootFrame = figma.createFrame();
+    rootFrame.name = "AI Layout: " + result.url;
+    rootFrame.layoutMode = "NONE" as any;
+    rootFrame.resize(pageW, pageH);
+    rootFrame.clipsContent = true;
+    rootFrame.x = offsetX;
+    rootFrame.y = 0;
+
+    // 1) 배경 레이어: 풀페이지 스크린샷
+    try {
+      var scrBytes = figma.base64Decode(result.aiScreenshot!);
+      var scrImage = figma.createImage(scrBytes);
+      rootFrame.fills = [{
+        type: "IMAGE",
+        imageHash: scrImage.hash,
+        scaleMode: "FILL",
+      } as ImagePaint];
+    } catch (_) {
+      rootFrame.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+    }
+
+    // 2) 텍스트 오버레이: AI가 추출한 텍스트를 편집 가능한 노드로 배치
+    for (var i = 0; i < textElements.length; i++) {
+      var tel = textElements[i];
+      if (!tel.text || tel.text.length === 0) continue;
+
+      var textNode = figma.createText();
+      textNode.name = tel.type + ": " + tel.text.slice(0, 30);
+
+      // 폰트
+      var fw = tel.fontWeight || 400;
+      var fStyle = fw >= 700 ? "Bold" : fw >= 600 ? "Semi Bold" : "Regular";
+      try {
+        textNode.fontName = { family: "Inter", style: fStyle };
+      } catch (_) {
+        textNode.fontName = { family: "Inter", style: "Regular" };
+      }
+
+      textNode.characters = tel.text;
+      textNode.fontSize = tel.fontSize || 16;
+
+      // 색상
+      if (tel.color) {
+        try {
+          textNode.fills = [{ type: "SOLID", color: hexToRgb(tel.color) }];
+        } catch (_) {
+          textNode.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+        }
+      }
+
+      // 위치
+      textNode.x = tel.x;
+      textNode.y = tel.y;
+      if (tel.width > 0) {
+        textNode.resize(tel.width, textNode.height);
+        textNode.textAutoResize = "HEIGHT";
+      }
+
+      rootFrame.appendChild(textNode);
+    }
+
+    offsetX += rootFrame.width + SITE_GAP;
+  }
+
+  figma.viewport.scrollAndZoomIntoView(
+    figma.currentPage.children.slice(-aiResults.length)
   );
 }

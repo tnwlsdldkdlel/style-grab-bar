@@ -717,6 +717,58 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
 
   try {
 
+    // 1) 페이지 전체를 스크롤하여 lazy loading 콘텐츠 트리거
+    await page.evaluate(async () => {
+      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const scrollHeight = document.body.scrollHeight;
+      const viewportHeight = window.innerHeight;
+      let scrolled = 0;
+      while (scrolled < scrollHeight) {
+        scrolled += viewportHeight;
+        window.scrollTo(0, scrolled);
+        await delay(300);
+      }
+      // 추가 대기 (애니메이션 완료)
+      await delay(1000);
+    });
+
+    // 스크롤 후 추가 네트워크 요청 완료 대기
+    await page.waitForNetworkIdle({ idleTime: 500, timeout: 5000 }).catch(() => {});
+
+    // 2) data-src → src 변환 (lazy image 패턴 강제 로드)
+    await page.evaluate(() => {
+      document.querySelectorAll("img[data-src]").forEach((img) => {
+        const dataSrc = img.getAttribute("data-src");
+        if (dataSrc) img.setAttribute("src", dataSrc);
+      });
+      // data-lazy, data-original 등 다른 lazy 패턴도 처리
+      document.querySelectorAll("img[data-lazy]").forEach((img) => {
+        const dataSrc = img.getAttribute("data-lazy");
+        if (dataSrc) img.setAttribute("src", dataSrc);
+      });
+      document.querySelectorAll("img[data-original]").forEach((img) => {
+        const dataSrc = img.getAttribute("data-original");
+        if (dataSrc) img.setAttribute("src", dataSrc);
+      });
+    });
+
+    // 3) CSS 강제 주입: 모든 요소를 보이게 (scroll animation 리셋 방지)
+    await page.addStyleTag({
+      content: `
+        *, *::before, *::after {
+          opacity: 1 !important;
+          visibility: visible !important;
+          transition: none !important;
+          animation: none !important;
+          transform: none !important;
+        }
+      `
+    });
+
+    // 맨 위로 복귀 (CSS 주입 후이므로 opacity 리셋 안 됨)
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 300));
+
     const layoutElements: LayoutElement[] = await page.evaluate(
       (maxElements: number, minSize: number, maxDepth: number) => {
         const rgbToHex = (rgb: string): string | null => {
@@ -767,6 +819,9 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
           display: string;
           overflow: string;
           isContainer: boolean;
+          hasBackgroundImage: boolean;
+          boxShadow: string | null;
+          gradient: string | null;
         }[] = [];
 
         let idCounter = 0;
@@ -788,12 +843,14 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
           if (rect.width < minSize || rect.height < minSize) continue;
 
           const style = window.getComputedStyle(el);
-          if (style.display === "none" || style.visibility === "hidden") continue;
-          if (parseFloat(style.opacity) === 0) continue;
+          if (style.display === "none") continue;
 
-          // 뷰포트 범위 밖 건너뛰기 (페이지 높이 3배 이내만)
+          // 뷰포트 범위 밖 건너뛰기
           const absY = rect.top + scrollY;
+          const absX = rect.left + scrollX;
           if (absY > document.body.scrollHeight * 3 || absY + rect.height < -100) continue;
+          // 가로 방향: 뷰포트 밖으로 완전히 벗어난 요소 건너뛰기
+          if (absX + rect.width < 0 || absX >= 1280) continue;
 
           const tag = el.tagName.toLowerCase();
           const id = idCounter++;
@@ -818,15 +875,25 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
 
           const hasChildren = el.children.length > 0;
           const overflow = style.overflow;
+          const bgImage = style.backgroundImage;
+          const hasBgImage = bgImage !== "none" && bgImage !== "";
+          const isGradient = hasBgImage && (bgImage.indexOf("gradient") !== -1);
+          const gradient = isGradient ? bgImage : null;
+          const rawShadow = style.boxShadow;
+          const boxShadow = (rawShadow && rawShadow !== "none") ? rawShadow : null;
+
+          // 뷰포트 내로 좌표/크기 클리핑
+          const clippedX = Math.max(0, Math.round(rect.left + scrollX));
+          const clippedW = Math.min(Math.round(rect.width), 1280 - clippedX);
 
           elements.push({
             id,
             parentId,
             tag,
             zIndex,
-            x: Math.round(rect.left + scrollX),
+            x: clippedX,
             y: Math.round(rect.top + scrollY),
-            width: Math.round(rect.width),
+            width: clippedW > 0 ? clippedW : Math.round(rect.width),
             height: Math.round(rect.height),
             textContent: hasText ? textContent : null,
             fontFamily: hasText ? style.fontFamily : null,
@@ -846,6 +913,9 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
             display: style.display,
             overflow: overflow,
             isContainer: hasChildren,
+            hasBackgroundImage: hasBgImage,
+            boxShadow: boxShadow,
+            gradient: gradient,
           });
 
           // 자식 요소 큐에 추가
@@ -863,36 +933,41 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
       MAX_DEPTH
     );
 
-    // 이미지 요소 캡쳐 (최대 30개)
-    const MAX_IMAGES = 30;
-    const imgElements = layoutElements.filter(el => el.tag === "img");
-    const imgTargets = imgElements.slice(0, MAX_IMAGES);
+    // 시각 요소 캡쳐 (img + background-image, 최대 50개)
+    const MAX_CAPTURES = 50;
+    const captureTargets = layoutElements
+      .filter(el => el.tag === "img" || el.tag === "svg" || el.hasBackgroundImage)
+      .slice(0, MAX_CAPTURES);
 
-    if (imgTargets.length > 0) {
-      const handles = await page.$$("img");
-      // img 핸들의 위치를 가져와서 layoutElement와 매칭
-      for (const handle of handles) {
+    if (captureTargets.length > 0) {
+      // 모든 요소를 CSS selector로 찾을 수 없으므로 위치 기반 매칭 사용
+      // body 내 모든 요소 핸들을 가져와서 위치로 매칭
+      const allHandles = await page.$$("body *");
+      let remaining = [...captureTargets];
+
+      for (const handle of allHandles) {
+        if (remaining.length === 0) break;
         try {
           const box = await handle.boundingBox();
           if (!box || box.width < 4 || box.height < 4) continue;
 
           // 위치로 매칭
-          const matchIdx = imgTargets.findIndex(el =>
+          const matchIdx = remaining.findIndex(el =>
             Math.abs(el.x - Math.round(box.x)) < 3 &&
-            Math.abs(el.y - Math.round(box.y)) < 3
+            Math.abs(el.y - Math.round(box.y)) < 3 &&
+            Math.abs(el.width - Math.round(box.width)) < 5 &&
+            Math.abs(el.height - Math.round(box.height)) < 5
           );
           if (matchIdx === -1) continue;
 
-          const buf = await handle.screenshot({ type: "jpeg", quality: 50, encoding: "base64" }) as string;
-          // 원본 layoutElements에서 해당 요소를 찾아 imageData 설정
-          const target = imgTargets[matchIdx];
+          const buf = await handle.screenshot({ type: "jpeg", quality: 60, encoding: "base64" }) as string;
+          const target = remaining[matchIdx];
           const origIdx = layoutElements.findIndex(el => el.id === target.id);
           if (origIdx !== -1) {
             layoutElements[origIdx].imageData = buf;
           }
-          imgTargets.splice(matchIdx, 1);
-          if (imgTargets.length === 0) break;
-        } catch (_) { /* 개별 이미지 실패 무시 */ }
+          remaining.splice(matchIdx, 1);
+        } catch (_) { /* 개별 캡처 실패 무시 */ }
       }
     }
 

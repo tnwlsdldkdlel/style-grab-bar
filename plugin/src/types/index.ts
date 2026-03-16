@@ -118,6 +118,9 @@ export interface LayoutElement {
   display: string;
   overflow: string;
   isContainer: boolean;
+  hasBackgroundImage: boolean;
+  boxShadow: string | null;
+  gradient: string | null;
   imageData?: string;
 }
 
@@ -134,11 +137,31 @@ export interface ExtractResult {
   screenshotChunks?: string[];
   elementPositions?: ElementPosition[];
   layoutElements?: LayoutElement[];
+  aiElements?: AILayoutElement[];
+  aiScreenshot?: string;
+  pageWidth?: number;
+  pageHeight?: number;
+}
+
+export interface AILayoutElement {
+  kind: "text" | "visual";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  type: string;
+  description: string;
+  text?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  color?: string;
+  backgroundColor?: string | null;
+  imageData?: string;
 }
 
 export type PluginMessage =
-  | { type: "extract"; urls: string[]; layoutMode?: boolean }
+  | { type: "extract"; urls: string[]; layoutMode?: boolean; aiLayoutMode?: boolean }
   | { type: "progress"; current: number; total: number; url: string }
   | { type: "result"; result: ExtractResult }
-  | { type: "done"; results: ExtractResult[]; cleanedOnly?: boolean; layoutMode?: boolean }
+  | { type: "done"; results: ExtractResult[]; cleanedOnly?: boolean; layoutMode?: boolean; aiLayoutMode?: boolean }
   | { type: "screenshot-chunk"; url: string; data: string; chunkIndex: number; totalChunks: number };

@@ -11,7 +11,7 @@ function App() {
   const [progress, setProgress] = useState({ current: 0, total: 0, url: "" });
   const [results, setResults] = useState<ExtractResult[]>([]);
   const [cleanedOnly, setCleanedOnly] = useState(false);
-  const [mode, setMode] = useState<"style" | "layout">("style");
+  const [mode, setMode] = useState<"style" | "layout" | "ai-layout">("style");
 
   const handleExtract = useCallback(async () => {
     const urlList = urls
@@ -26,7 +26,12 @@ function App() {
     const allResults: ExtractResult[] = [];
 
     const isLayout = mode === "layout";
-    const endpoint = isLayout ? "/api/extract-layout" : "/api/extract";
+    const isAILayout = mode === "ai-layout";
+    const endpoint = isAILayout
+      ? "/api/extract-layout-ai"
+      : isLayout
+      ? "/api/extract-layout"
+      : "/api/extract";
 
     for (let i = 0; i < urlList.length; i++) {
       const url = urlList[i];
@@ -39,7 +44,7 @@ function App() {
           body: JSON.stringify({ url }),
         });
         const result: ExtractResult = await resp.json();
-        console.log("[UI] fetch result:", url, "success:", result.success, "hasData:", !!result.data, "hasLayout:", !!result.layoutElements);
+        console.log("[UI] fetch result:", url, "success:", result.success, "hasData:", !!result.data, "hasLayout:", !!result.layoutElements, "hasAI:", !!result.aiElements, "error:", result.error);
         allResults.push(result);
       } catch (err) {
         console.error("[UI] fetch error:", url, err);
@@ -55,7 +60,13 @@ function App() {
 
     console.log("[UI] posting done message. mode:", mode, "resultCount:", allResults.length, "successes:", allResults.filter(r => r.success).length);
 
-    if (isLayout) {
+    if (isAILayout) {
+      // AI Layout 모드
+      parent.postMessage(
+        { pluginMessage: { type: "done", results: allResults, aiLayoutMode: true } },
+        "*"
+      );
+    } else if (isLayout) {
       // Layout 모드: 스크린샷 없이 바로 전달
       parent.postMessage(
         { pluginMessage: { type: "done", results: allResults, layoutMode: true } },
@@ -155,6 +166,28 @@ function App() {
           />
           Layout Reconstruction
         </label>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            cursor: "pointer",
+            userSelect: "none",
+            color: mode === "ai-layout" ? "#10a37f" : "#555",
+            fontWeight: mode === "ai-layout" ? 600 : 400,
+          }}
+        >
+          <input
+            type="radio"
+            name="mode"
+            value="ai-layout"
+            checked={mode === "ai-layout"}
+            onChange={() => setMode("ai-layout")}
+            disabled={isProcessing}
+            style={{ margin: 0, cursor: "pointer" }}
+          />
+          AI Layout
+        </label>
       </div>
 
       {/* Phase 17: Cleaned Version 토글 (Style 모드에서만 표시) */}
@@ -198,7 +231,7 @@ function App() {
           marginTop: 8,
           width: "100%",
           padding: "8px 0",
-          backgroundColor: isProcessing ? "#ccc" : mode === "layout" ? "#7b61ff" : cleanedOnly ? "#7b61ff" : "#18a0fb",
+          backgroundColor: isProcessing ? "#ccc" : mode === "ai-layout" ? "#10a37f" : mode === "layout" ? "#7b61ff" : cleanedOnly ? "#7b61ff" : "#18a0fb",
           color: "#fff",
           border: "none",
           borderRadius: 4,
@@ -209,6 +242,8 @@ function App() {
       >
         {isProcessing
           ? "추출 중..."
+          : mode === "ai-layout"
+          ? "AI 레이아웃 추출 시작"
           : mode === "layout"
           ? "레이아웃 추출 시작"
           : cleanedOnly

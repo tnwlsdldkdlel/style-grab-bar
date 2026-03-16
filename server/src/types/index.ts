@@ -118,6 +118,9 @@ export interface LayoutElement {
   display: string;
   overflow: string;
   isContainer: boolean;
+  hasBackgroundImage: boolean;
+  boxShadow: string | null;
+  gradient: string | null;
   imageData?: string;
 }
 
@@ -134,4 +137,8 @@ export interface ExtractResult {
   screenshotChunks?: string[];
   elementPositions?: ElementPosition[];
   layoutElements?: LayoutElement[];
+  aiElements?: any[];
+  aiScreenshot?: string;
+  pageWidth?: number;
+  pageHeight?: number;
 }
