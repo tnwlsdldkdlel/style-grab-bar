@@ -1,4 +1,4 @@
-import type { ExtractResult, TypographyStyle, SemanticGroup, ComponentSpec, AuditResult, StyleCluster, FragmentationWarning, HierarchyNode, Anomaly, CleanedStyle, CleanedData, ElementPosition, LayoutElement } from "../types";
+import type { ExtractResult, TypographyStyle, SemanticGroup, ComponentSpec, AuditResult, StyleCluster, FragmentationWarning, HierarchyNode, Anomaly, CleanedStyle, CleanedData, ElementPosition, LayoutElement, LayoutNode } from "../types";
 
 // ── 상수 ──
 var SITE_GAP = 600;
@@ -446,33 +446,111 @@ function createColorSwatchRow(style: TypographyStyle, registeredPaintStyle?: Pai
 
 // ── Layout 렌더러 공유 헬퍼 ──
 
+// CSS var() fallback에서 실제 색상 추출
+function resolveVarColor(str: string): string | null {
+  // var(--name, #hex) or var(--name, rgba(...))
+  var fallback = str.match(/var\([^,]+,\s*([^)]+)\)/);
+  if (fallback) return fallback[1].trim();
+  return null;
+}
+
+// CSS 색상 문자열 → { r, g, b, a }
+function parseCssColor(colorStr: string): { r: number; g: number; b: number; a: number } | null {
+  // var() 처리 — fallback 값 추출
+  if (colorStr.startsWith("var(")) {
+    var resolved = resolveVarColor(colorStr);
+    if (!resolved) return null;
+    return parseCssColor(resolved);
+  }
+
+  // hex
+  if (colorStr.charAt(0) === "#") {
+    var rgb = hexToRgb(colorStr);
+    return { r: rgb.r, g: rgb.g, b: rgb.b, a: 1 };
+  }
+
+  // rgba(r, g, b, a) or rgb(r, g, b)
+  var rgbaM = colorStr.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+))?\s*\)/);
+  if (rgbaM) {
+    return {
+      r: parseInt(rgbaM[1]) / 255,
+      g: parseInt(rgbaM[2]) / 255,
+      b: parseInt(rgbaM[3]) / 255,
+      a: rgbaM[4] !== undefined ? parseFloat(rgbaM[4]) : 1,
+    };
+  }
+
+  return null;
+}
+
 // CSS linear-gradient를 Figma GradientPaint로 파싱
 function parseLinearGradient(css: string): GradientPaint | null {
-  // linear-gradient(135deg, #667eea 0%, #764ba2 100%)
-  var inner = css.match(/linear-gradient\(([^)]+(?:\([^)]*\)[^)]*)*)\)/);
-  if (!inner) return null;
+  // linear-gradient 내부 추출 (중첩 괄호 지원)
+  var startIdx = css.indexOf("linear-gradient(");
+  if (startIdx === -1) return null;
+  var depth = 0;
+  var endIdx = -1;
+  for (var ci = startIdx; ci < css.length; ci++) {
+    if (css[ci] === "(") depth++;
+    else if (css[ci] === ")") {
+      depth--;
+      if (depth === 0) { endIdx = ci; break; }
+    }
+  }
+  if (endIdx === -1) return null;
 
-  var parts = inner[1];
+  var parts = css.substring(startIdx + "linear-gradient(".length, endIdx);
+
   // 각도 파싱
   var angleMatch = parts.match(/^([\d.]+)deg/);
   var angle = angleMatch ? parseFloat(angleMatch[1]) : 180;
 
-  // 색상 stop 파싱
-  var stopRegex = /(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s*([\d.]+%)?/g;
-  var match: RegExpExecArray | null;
-  var stops: ColorStop[] = [];
-  while ((match = stopRegex.exec(parts)) !== null) {
-    var colorStr = match[1];
-    var pos = match[2] ? parseFloat(match[2]) / 100 : -1;
-    var rgb: RGB;
-    if (colorStr.charAt(0) === "#") {
-      rgb = hexToRgb(colorStr);
-    } else {
-      var rgbaM = colorStr.match(/\d+/g);
-      if (!rgbaM || rgbaM.length < 3) continue;
-      rgb = { r: parseInt(rgbaM[0]) / 255, g: parseInt(rgbaM[1]) / 255, b: parseInt(rgbaM[2]) / 255 };
+  // 색상 stop 파싱 — 최상위 콤마로 분리 (중첩 괄호 내 콤마 무시)
+  var tokens: string[] = [];
+  var tokenStart = 0;
+  var parenDepth = 0;
+  for (var ti = 0; ti < parts.length; ti++) {
+    if (parts[ti] === "(") parenDepth++;
+    else if (parts[ti] === ")") parenDepth--;
+    else if (parts[ti] === "," && parenDepth === 0) {
+      tokens.push(parts.substring(tokenStart, ti).trim());
+      tokenStart = ti + 1;
     }
-    stops.push({ position: pos, color: { r: rgb.r, g: rgb.g, b: rgb.b, a: 1 } });
+  }
+  tokens.push(parts.substring(tokenStart).trim());
+
+  // 첫 번째 토큰이 각도면 건너뛰기
+  var startToken = 0;
+  if (/^[\d.]+deg/.test(tokens[0]) || /^to\s/.test(tokens[0])) {
+    startToken = 1;
+  }
+
+  var stops: ColorStop[] = [];
+  for (var si = startToken; si < tokens.length; si++) {
+    var token = tokens[si];
+
+    // 위치값(%) 추출
+    var posMatch = token.match(/([\d.]+)\s*%\s*$/);
+    var pos = posMatch ? parseFloat(posMatch[1]) / 100 : -1;
+
+    // 위치값 제거 후 색상 부분 추출
+    var colorPart = posMatch ? token.substring(0, posMatch.index).trim() : token.trim();
+    // "0" 같은 단위 없는 위치값 처리 (0% 의미)
+    if (!posMatch) {
+      var zeroMatch = colorPart.match(/\s+0$/);
+      if (zeroMatch) {
+        pos = 0;
+        colorPart = colorPart.substring(0, zeroMatch.index).trim();
+      }
+    }
+
+    var parsed = parseCssColor(colorPart);
+    if (!parsed) continue;
+
+    stops.push({
+      position: pos,
+      color: { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a },
+    });
   }
 
   if (stops.length < 2) return null;
@@ -1754,7 +1832,7 @@ function renderCaptureFrame(result: ExtractResult): FrameNode | null {
   var imgContainer = figma.createFrame();
   imgContainer.name = "Screenshot";
   imgContainer.layoutMode = "NONE";
-  imgContainer.resize(CAPTURE_WIDTH, CAPTURE_WIDTH * 800 / 1280);
+  imgContainer.resize(CAPTURE_WIDTH, CAPTURE_WIDTH * 1080 / 1920);
   imgContainer.fills = [{
     type: "IMAGE",
     imageHash: image.hash,
@@ -1766,7 +1844,7 @@ function renderCaptureFrame(result: ExtractResult): FrameNode | null {
   // ── Phase 21: 하이라이트 오버레이 ──
   var positions = result.elementPositions;
   if (positions && positions.length > 0) {
-    var scale = CAPTURE_WIDTH / 1280;
+    var scale = CAPTURE_WIDTH / 1920;
     // 스크린샷 높이 재계산 (실제 캡처 높이 기반)
     var maxY = 0;
     for (var pi = 0; pi < positions.length; pi++) {
@@ -1774,9 +1852,9 @@ function renderCaptureFrame(result: ExtractResult): FrameNode | null {
       if (bottom > maxY) maxY = bottom;
     }
     // 캡처 높이 = min(bodyHeight, 4096), scale에 반영
-    var captureHeight = Math.max(maxY + 100, 900);
+    var captureHeight = Math.max(maxY + 100, 1080);
     var scaledHeight = captureHeight * scale;
-    imgContainer.resize(CAPTURE_WIDTH, Math.max(scaledHeight, CAPTURE_WIDTH * 800 / 1280));
+    imgContainer.resize(CAPTURE_WIDTH, Math.max(scaledHeight, CAPTURE_WIDTH * 1080 / 1920));
 
     for (var oi = 0; oi < positions.length; oi++) {
       var pos = positions[oi];
@@ -2640,7 +2718,7 @@ function renderCaptureFrameFromChunks(url: string, chunks: Uint8Array[], result:
   if (chunks.length === 0) return null;
 
   var CHUNK_HEIGHT = 1200;
-  var scale = CAPTURE_WIDTH / 1280;
+  var scale = CAPTURE_WIDTH / 1920;
 
   var captureFrame = createAutoFrame("Visual Capture: " + url, "VERTICAL", 8, 0);
   captureFrame.fills = [];
@@ -2788,13 +2866,13 @@ export async function renderLayout(results: ExtractResult[]) {
     rootFrame.layoutMode = "NONE" as any;
     rootFrame.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
 
-    // 전체 페이지 크기 계산 (폭은 뷰포트 1280px 고정)
-    var maxY = 800;
+    // 전체 페이지 크기 계산 (폭은 뷰포트 1920px 고정)
+    var maxY = 1080;
     for (var i = 0; i < elements.length; i++) {
       var bottom = elements[i].y + elements[i].height;
       if (bottom > maxY) maxY = bottom;
     }
-    rootFrame.resize(1280, maxY);
+    rootFrame.resize(1920, maxY);
     rootFrame.clipsContent = true;
     rootFrame.x = offsetX;
     rootFrame.y = 0;
@@ -2960,7 +3038,7 @@ export async function renderAILayout(results: ExtractResult[]) {
   for (var ri = 0; ri < aiResults.length; ri++) {
     var result = aiResults[ri];
     var textElements = (result.aiElements || []).filter(function (e) { return e.kind === "text"; });
-    var pageW = result.pageWidth || 1280;
+    var pageW = result.pageWidth || 1920;
     var pageH = result.pageHeight || 800;
 
     // 루트 프레임 생성
@@ -3030,5 +3108,433 @@ export async function renderAILayout(results: ExtractResult[]) {
 
   figma.viewport.scrollAndZoomIntoView(
     figma.currentPage.children.slice(-aiResults.length)
+  );
+}
+
+// ── Semantic Layout 렌더러 (Auto Layout 기반) ──
+
+function applyNodeVisualStyle(frame: FrameNode, node: LayoutNode): void {
+  // 배경
+  if (node.gradient && !node.imageData) {
+    var grad = parseLinearGradient(node.gradient);
+    if (grad) {
+      frame.fills = [grad];
+    } else if (node.backgroundColor) {
+      frame.fills = [{ type: "SOLID", color: hexToRgb(node.backgroundColor) }];
+    } else {
+      frame.fills = [];
+    }
+  } else if (node.backgroundColor) {
+    frame.fills = [{ type: "SOLID", color: hexToRgb(node.backgroundColor) }];
+  } else {
+    frame.fills = [];
+  }
+
+  // 보더
+  if (node.borderWidth > 0 && node.borderColor) {
+    frame.strokes = [{ type: "SOLID", color: hexToRgb(node.borderColor) }];
+    frame.strokeWeight = Math.min(node.borderWidth, 4);
+  }
+
+  // 라운딩
+  if (node.borderRadius > 0) {
+    frame.cornerRadius = node.borderRadius;
+  }
+
+  // 그림자
+  if (node.boxShadow) {
+    var shadows = node.boxShadow.split(/,(?![^(]*\))/);
+    var effects: Effect[] = [];
+    for (var si = 0; si < shadows.length; si++) {
+      var trimmed = shadows[si].trim();
+      if (trimmed.indexOf("inset") !== -1) continue;
+      var effect = parseBoxShadow(trimmed);
+      if (effect) effects.push(effect);
+    }
+    if (effects.length > 0) frame.effects = effects;
+  }
+
+  // opacity
+  if (node.opacity < 1) {
+    frame.opacity = node.opacity;
+  }
+
+  // 클리핑
+  var ov = node.overflow || "visible";
+  frame.clipsContent = (ov === "hidden" || ov === "clip" || ov === "scroll" || ov === "auto");
+}
+
+function createStyledText(node: LayoutNode): TextNode {
+  var textNode = figma.createText();
+  textNode.name = node.tag;
+  var fontFamily = node.fontFamily ? shortFontName(node.fontFamily) : "Inter";
+  var fontWeight = node.fontWeight || 400;
+  var cKey = fontFamily + "::" + weightToStyle(fontWeight);
+
+  if (loadedFontCache[cKey]) {
+    textNode.fontName = { family: fontFamily, style: weightToStyle(fontWeight) };
+  } else {
+    textNode.fontName = { family: "Inter", style: fontWeight >= 600 ? "Bold" : "Regular" };
+  }
+
+  textNode.characters = node.textContent || "";
+  textNode.fontSize = node.fontSize || 16;
+  if (node.lineHeight && node.lineHeight > 0) {
+    textNode.lineHeight = { value: node.lineHeight, unit: "PIXELS" };
+  }
+  if (node.letterSpacing && node.letterSpacing !== 0) {
+    textNode.letterSpacing = { value: node.letterSpacing, unit: "PIXELS" };
+  }
+  if (node.textColor) {
+    textNode.fills = [{ type: "SOLID", color: hexToRgb(node.textColor) }];
+  }
+  if (node.textAlign === "center") {
+    textNode.textAlignHorizontal = "CENTER";
+  } else if (node.textAlign === "right") {
+    textNode.textAlignHorizontal = "RIGHT";
+  }
+  // 기본: HEIGHT (가로는 부모가 결정, 세로만 텍스트에 맞춤)
+  textNode.textAutoResize = "HEIGHT";
+  return textNode;
+}
+
+function hasTextDescendant(node: LayoutNode): boolean {
+  if (node.textContent) return true;
+  for (var i = 0; i < node.children.length; i++) {
+    if (hasTextDescendant(node.children[i])) return true;
+  }
+  return false;
+}
+
+function applyChildSizing(childNode: SceneNode, childData: LayoutNode, parentNode: LayoutNode): void {
+  var isHorizontalParent = parentNode.layoutModel === "flex-row";
+  var isSpaceBetween = parentNode.mainAxisAlign === "space-between";
+  var crossAlign = parentNode.crossAxisAlign;
+  // 교차축이 center/end이면 자식을 FILL하면 안 됨 (정렬 효과가 사라짐)
+  var crossIsCentered = crossAlign === "center" || crossAlign === "end";
+
+  try {
+    if (childNode.type === "TEXT") {
+      var tn = childNode as TextNode;
+
+      if (isHorizontalParent) {
+        // HORIZONTAL 부모의 주축 = 가로
+        if (isSpaceBetween || childData.widthMode === "hug") {
+          tn.textAutoResize = "WIDTH_AND_HEIGHT";
+          tn.layoutSizingHorizontal = "HUG";
+        } else if (childData.widthMode === "fill") {
+          tn.textAutoResize = "HEIGHT";
+          tn.layoutSizingHorizontal = "FILL";
+        } else {
+          tn.textAutoResize = "HEIGHT";
+          tn.layoutSizingHorizontal = "FIXED";
+        }
+        // HORIZONTAL 교차축 = 세로: center면 HUG 유지
+        tn.layoutSizingVertical = "HUG";
+      } else {
+        // VERTICAL 부모의 교차축 = 가로
+        if (crossIsCentered && childData.widthMode !== "fill") {
+          // center/end 정렬이면 가로를 FILL하면 안 됨
+          tn.textAutoResize = "WIDTH_AND_HEIGHT";
+          tn.layoutSizingHorizontal = childData.widthMode === "fixed" ? "FIXED" : "HUG";
+        } else {
+          tn.textAutoResize = "HEIGHT";
+          tn.layoutSizingHorizontal = "FILL";
+        }
+        tn.layoutSizingVertical = "HUG";
+      }
+      return;
+    }
+
+    if (childNode.type === "FRAME") {
+      var fn = childNode as FrameNode;
+      // 텍스트를 포함하는 프레임은 높이를 HUG로 (텍스트 오버플로우 방지)
+      var containsText = hasTextDescendant(childData);
+
+      if (isHorizontalParent) {
+        // ── HORIZONTAL 부모 ──
+        // 주축 = 가로
+        if (isSpaceBetween && childData.widthMode !== "fill") {
+          fn.layoutSizingHorizontal = childData.widthMode === "fixed" ? "FIXED" : "HUG";
+        } else if (childData.widthMode === "fill") {
+          fn.layoutSizingHorizontal = "FILL";
+        } else if (childData.widthMode === "fixed") {
+          fn.layoutSizingHorizontal = "FIXED";
+        } else {
+          fn.layoutSizingHorizontal = "HUG";
+        }
+
+        // 교차축 = 세로: center/end면 FILL하면 안 됨
+        if (crossIsCentered && childData.heightMode !== "fill") {
+          fn.layoutSizingVertical = childData.heightMode === "fixed" ? "FIXED" : "HUG";
+        } else if (childData.heightMode === "fill") {
+          fn.layoutSizingVertical = "FILL";
+        } else {
+          fn.layoutSizingVertical = "HUG";
+        }
+      } else {
+        // ── VERTICAL 부모 ──
+        // 교차축 = 가로: center/end면 FILL하면 안 됨
+        if (crossIsCentered && childData.widthMode !== "fill") {
+          fn.layoutSizingHorizontal = childData.widthMode === "fixed" ? "FIXED" : "HUG";
+        } else if (childData.widthMode === "fixed") {
+          fn.layoutSizingHorizontal = "FIXED";
+        } else {
+          fn.layoutSizingHorizontal = "FILL";
+        }
+
+        // 주축 = 세로: 텍스트 포함이면 HUG 우선
+        if (isSpaceBetween && childData.heightMode !== "fill") {
+          fn.layoutSizingVertical = childData.heightMode === "fixed" ? "FIXED" : "HUG";
+        } else if (childData.heightMode === "fill") {
+          fn.layoutSizingVertical = "FILL";
+        } else if (childData.heightMode === "fixed" && !containsText) {
+          fn.layoutSizingVertical = "FIXED";
+        } else {
+          fn.layoutSizingVertical = "HUG";
+        }
+      }
+    }
+  } catch (_) { /* sizing 설정 실패 시 무시 */ }
+}
+
+async function renderNode(node: LayoutNode): Promise<SceneNode | null> {
+  // 리프 텍스트 노드
+  if (node.layoutModel === "leaf" && node.textContent) {
+    var hasBg = !!(node.backgroundColor || node.borderWidth > 0 || node.boxShadow || node.gradient);
+
+    if (hasBg) {
+      // 배경이 있는 텍스트: 프레임으로 감싸기
+      var textFrame = figma.createFrame();
+      textFrame.name = node.tag + " (text)";
+      textFrame.resize(Math.max(node.width, 1), Math.max(node.height, 1));
+      textFrame.layoutMode = "VERTICAL";
+      textFrame.primaryAxisSizingMode = "AUTO";
+      textFrame.counterAxisSizingMode = "FIXED";
+      textFrame.paddingTop = node.paddingTop;
+      textFrame.paddingRight = node.paddingRight;
+      textFrame.paddingBottom = node.paddingBottom;
+      textFrame.paddingLeft = node.paddingLeft;
+      applyNodeVisualStyle(textFrame, node);
+
+      var textNode = createStyledText(node);
+      textFrame.appendChild(textNode);
+      textNode.layoutSizingHorizontal = "FILL";
+      textNode.layoutSizingVertical = "HUG";
+      return textFrame;
+    } else {
+      return createStyledText(node);
+    }
+  }
+
+  // 이미지 노드
+  if (node.isImage) {
+    var imgFrame = figma.createFrame();
+    imgFrame.name = node.tag === "img" ? "img" : "bg-image";
+    imgFrame.resize(Math.max(node.width, 1), Math.max(node.height, 1));
+    imgFrame.clipsContent = true;
+    if (node.borderRadius > 0) imgFrame.cornerRadius = node.borderRadius;
+
+    if (node.imageData) {
+      try {
+        var imgBytes = figma.base64Decode(node.imageData);
+        var figmaImage = figma.createImage(imgBytes);
+        imgFrame.fills = [{
+          type: "IMAGE",
+          imageHash: figmaImage.hash,
+          scaleMode: "FILL",
+        } as ImagePaint];
+      } catch (_) {
+        imgFrame.fills = [{ type: "SOLID", color: { r: 0.94, g: 0.94, b: 0.96 } }];
+      }
+    } else {
+      imgFrame.fills = [{ type: "SOLID", color: { r: 0.94, g: 0.94, b: 0.96 } }];
+    }
+
+    return imgFrame;
+  }
+
+  // 컨테이너 노드
+  var frame = figma.createFrame();
+  frame.name = node.role || node.tag;
+
+  // DOM 원본 크기로 초기화 (FILL 적용 전 기준 크기)
+  frame.resize(Math.max(node.width, 1), Math.max(node.height, 1));
+
+  var isHorizontal = node.layoutModel === "flex-row";
+
+  // Auto Layout 설정
+  frame.layoutMode = isHorizontal ? "HORIZONTAL" : "VERTICAL";
+
+  // gap
+  frame.itemSpacing = Math.round(node.gap);
+
+  // padding
+  frame.paddingTop = Math.round(node.paddingTop);
+  frame.paddingRight = Math.round(node.paddingRight);
+  frame.paddingBottom = Math.round(node.paddingBottom);
+  frame.paddingLeft = Math.round(node.paddingLeft);
+
+  // 주축 정렬
+  if (node.mainAxisAlign === "center") {
+    frame.primaryAxisAlignItems = "CENTER";
+  } else if (node.mainAxisAlign === "end") {
+    frame.primaryAxisAlignItems = "MAX";
+  } else if (node.mainAxisAlign === "space-between") {
+    frame.primaryAxisAlignItems = "SPACE_BETWEEN";
+  } else {
+    frame.primaryAxisAlignItems = "MIN";
+  }
+
+  // 교차축 정렬
+  if (node.crossAxisAlign === "center") {
+    frame.counterAxisAlignItems = "CENTER";
+  } else if (node.crossAxisAlign === "end") {
+    frame.counterAxisAlignItems = "MAX";
+  } else {
+    frame.counterAxisAlignItems = "MIN";
+  }
+
+  // wrap
+  if (node.flexWrap) {
+    (frame as any).layoutWrap = "WRAP";
+    // wrap 모드에서 줄 간 gap (counterAxisSpacing)
+    // flex-row: crossGap = row-gap, gap = column-gap (itemSpacing)
+    // flex-col: crossGap = column-gap, gap = row-gap (itemSpacing)
+    if (node.crossGap > 0) {
+      (frame as any).counterAxisSpacing = Math.round(node.crossGap);
+    } else if (node.gap > 0) {
+      // gap shorthand: row-gap과 column-gap이 같은 경우
+      (frame as any).counterAxisSpacing = Math.round(node.gap);
+    }
+  }
+
+  // 시각 스타일
+  applyNodeVisualStyle(frame, node);
+
+  // 프레임 크기 모드
+  frame.primaryAxisSizingMode = "AUTO"; // 주축 HUG
+  frame.counterAxisSizingMode = "FIXED"; // 교차축 FIXED (DOM 원본 크기 유지, center 정렬 공간 확보)
+
+  // 자식 중 margin:auto로 가운데 정렬된 요소가 있으면 부모 교차축을 CENTER로
+  var hasCenteredChild = false;
+  for (var ci = 0; ci < node.children.length; ci++) {
+    if (node.children[ci].isCentered) {
+      hasCenteredChild = true;
+      break;
+    }
+  }
+  if (hasCenteredChild && !isHorizontal) {
+    frame.counterAxisAlignItems = "CENTER";
+  }
+
+  // 자식 렌더링
+  for (var ci = 0; ci < node.children.length; ci++) {
+    var childData = node.children[ci];
+    var childNode = await renderNode(childData);
+    if (!childNode) continue;
+
+    var hasMargin = childData.marginTop > 0 || childData.marginRight > 0 ||
+                    childData.marginBottom > 0 || childData.marginLeft > 0;
+
+    if (hasMargin && !childData.isCentered) {
+      // margin이 있는 요소: wrapper 프레임으로 감싸서 padding으로 변환
+      var marginWrapper = figma.createFrame();
+      marginWrapper.name = "margin-wrap";
+      marginWrapper.fills = [];
+      marginWrapper.clipsContent = false;
+      marginWrapper.layoutMode = isHorizontal ? "HORIZONTAL" : "VERTICAL";
+      marginWrapper.primaryAxisSizingMode = "AUTO";
+      marginWrapper.counterAxisSizingMode = "AUTO";
+      marginWrapper.paddingTop = Math.round(childData.marginTop);
+      marginWrapper.paddingRight = Math.round(childData.marginRight);
+      marginWrapper.paddingBottom = Math.round(childData.marginBottom);
+      marginWrapper.paddingLeft = Math.round(childData.marginLeft);
+      marginWrapper.itemSpacing = 0;
+      marginWrapper.appendChild(childNode);
+      applyChildSizing(childNode, childData, node);
+      frame.appendChild(marginWrapper);
+      // wrapper 크기: 교차축 center/end면 HUG (센터링 유지), 아니면 FILL
+      var parentCrossCenter = node.crossAxisAlign === "center" || node.crossAxisAlign === "end";
+      try {
+        if (!isHorizontal) {
+          marginWrapper.layoutSizingHorizontal = parentCrossCenter ? "HUG" : "FILL";
+          marginWrapper.layoutSizingVertical = "HUG";
+        } else {
+          marginWrapper.layoutSizingHorizontal = "HUG";
+          marginWrapper.layoutSizingVertical = parentCrossCenter ? "HUG" : "FILL";
+        }
+      } catch (_) {}
+    } else {
+      frame.appendChild(childNode);
+      applyChildSizing(childNode, childData, node);
+    }
+  }
+
+  return frame;
+}
+
+export async function renderSemanticLayout(results: ExtractResult[]) {
+  var semanticResults = results.filter(function (r) {
+    return r.success && r.layoutTree;
+  });
+  if (semanticResults.length === 0) return;
+
+  // Inter 기본 로드
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+  await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+
+  // 트리에서 사용된 폰트 사전 로드
+  function collectFonts(node: LayoutNode, seen: Record<string, boolean>) {
+    if (node.textContent && node.fontFamily && node.fontWeight !== null) {
+      var fKey = shortFontName(node.fontFamily) + "::" + node.fontWeight;
+      if (!seen[fKey]) {
+        seen[fKey] = true;
+      }
+    }
+    for (var i = 0; i < node.children.length; i++) {
+      collectFonts(node.children[i], seen);
+    }
+  }
+
+  for (var ri = 0; ri < semanticResults.length; ri++) {
+    var tree = semanticResults[ri].layoutTree!;
+    var fontSeen: Record<string, boolean> = {};
+    collectFonts(tree, fontSeen);
+    var fontKeys = Object.keys(fontSeen);
+    for (var fi = 0; fi < fontKeys.length; fi++) {
+      var parts = fontKeys[fi].split("::");
+      await tryLoadFont(parts[0], parseInt(parts[1], 10));
+    }
+  }
+
+  var offsetX = 0;
+
+  for (var ri = 0; ri < semanticResults.length; ri++) {
+    var result = semanticResults[ri];
+    var tree = result.layoutTree!;
+
+    // 루트 프레임을 렌더링
+    var rootNode = await renderNode(tree);
+    if (!rootNode) continue;
+
+    // 최상위 프레임 설정
+    if (rootNode.type === "FRAME") {
+      rootNode.name = "Semantic: " + result.url;
+      // 루트는 고정 너비, hug 높이
+      (rootNode as FrameNode).layoutSizingHorizontal = "FIXED";
+      (rootNode as FrameNode).resize(1920, (rootNode as FrameNode).height);
+      (rootNode as FrameNode).layoutSizingVertical = "HUG";
+    }
+
+    rootNode.x = offsetX;
+    rootNode.y = 0;
+    figma.currentPage.appendChild(rootNode);
+
+    offsetX += rootNode.width + SITE_GAP;
+  }
+
+  figma.viewport.scrollAndZoomIntoView(
+    figma.currentPage.children.slice(-semanticResults.length)
   );
 }

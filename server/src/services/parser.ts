@@ -12,6 +12,7 @@ import type {
   CleanedData,
   ElementPosition,
   LayoutElement,
+  LayoutNode,
 } from "../types";
 
 const TIMEOUT = 15_000;
@@ -476,7 +477,7 @@ function cleanStyles(
 
 // ── 공용 브라우저 헬퍼 ──
 
-const VIEWPORT = { width: 1280, height: 800 };
+const VIEWPORT = { width: 1920, height: 1080 };
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 async function openPage(url: string): Promise<{ browser: Awaited<ReturnType<typeof puppeteer.launch>>; page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>["newPage"]>> }> {
@@ -850,7 +851,7 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
           const absX = rect.left + scrollX;
           if (absY > document.body.scrollHeight * 3 || absY + rect.height < -100) continue;
           // 가로 방향: 뷰포트 밖으로 완전히 벗어난 요소 건너뛰기
-          if (absX + rect.width < 0 || absX >= 1280) continue;
+          if (absX + rect.width < 0 || absX >= 1920) continue;
 
           const tag = el.tagName.toLowerCase();
           const id = idCounter++;
@@ -884,7 +885,7 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
 
           // 뷰포트 내로 좌표/크기 클리핑
           const clippedX = Math.max(0, Math.round(rect.left + scrollX));
-          const clippedW = Math.min(Math.round(rect.width), 1280 - clippedX);
+          const clippedW = Math.min(Math.round(rect.width), 1920 - clippedX);
 
           elements.push({
             id,
@@ -972,6 +973,483 @@ export async function parseLayout(url: string): Promise<{ layoutElements: Layout
     }
 
     return { layoutElements };
+  } finally {
+    await browser.close();
+  }
+}
+
+// ── Semantic Layout 추출 ──
+
+const MAX_SEMANTIC_NODES = 800;
+const MAX_SEMANTIC_DEPTH = 15;
+
+const SKIP_TAGS = new Set(["script", "style", "noscript", "link", "meta", "head", "br", "hr"]);
+const SEMANTIC_ROLES = new Set(["header", "nav", "main", "footer", "section", "article", "aside", "form"]);
+
+export async function parseSemanticLayout(url: string): Promise<{ layoutTree: LayoutNode }> {
+  const { browser, page } = await openPage(url);
+
+  try {
+    // 1) lazy loading 트리거
+    await page.evaluate(async () => {
+      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const scrollHeight = document.body.scrollHeight;
+      const viewportHeight = window.innerHeight;
+      let scrolled = 0;
+      while (scrolled < scrollHeight) {
+        scrolled += viewportHeight;
+        window.scrollTo(0, scrolled);
+        await delay(300);
+      }
+      await delay(1000);
+    });
+
+    await page.waitForNetworkIdle({ idleTime: 500, timeout: 5000 }).catch(() => {});
+
+    // 2) lazy image 강제 로드
+    await page.evaluate(() => {
+      const attrs = ["data-src", "data-lazy", "data-original"];
+      for (const attr of attrs) {
+        document.querySelectorAll(`img[${attr}]`).forEach((img) => {
+          const val = img.getAttribute(attr);
+          if (val) img.setAttribute("src", val);
+        });
+      }
+    });
+
+    // 3) CSS 강제 주입
+    await page.addStyleTag({
+      content: `
+        *, *::before, *::after {
+          opacity: 1 !important;
+          visibility: visible !important;
+          transition: none !important;
+          animation: none !important;
+        }
+      `
+    });
+
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 300));
+
+    // 4) DOM 순회하여 시맨틱 트리 구축
+    const rawTree = await page.evaluate(
+      (maxNodes: number, maxDepth: number) => {
+        let nodeCount = 0;
+
+        const rgbToHex = (rgb: string): string | null => {
+          if (!rgb || rgb === "transparent" || rgb === "rgba(0, 0, 0, 0)") return null;
+          const match = rgb.match(/\d+(\.\d+)?/g);
+          if (!match || match.length < 3) return null;
+          if (match.length >= 4 && parseFloat(match[3]) === 0) return null;
+          return "#" + match.slice(0, 3).map((v) => Math.round(parseFloat(v)).toString(16).padStart(2, "0")).join("");
+        };
+
+        const getOwnText = (el: Element): string | null => {
+          let text = "";
+          for (let i = 0; i < el.childNodes.length; i++) {
+            const node = el.childNodes[i];
+            if (node.nodeType === Node.TEXT_NODE) {
+              text += (node.textContent || "").trim();
+            }
+          }
+          return text.length > 0 ? text.slice(0, 300) : null;
+        };
+
+        const skipTags = new Set(["script", "style", "noscript", "link", "meta", "head", "br", "hr"]);
+        const semanticRoles = new Set(["header", "nav", "main", "footer", "section", "article", "aside", "form"]);
+
+        const mapJustify = (v: string): "start" | "center" | "end" | "space-between" => {
+          if (v === "center") return "center";
+          if (v === "flex-end" || v === "end") return "end";
+          if (v === "space-between") return "space-between";
+          return "start";
+        };
+
+        const mapAlign = (v: string): "start" | "center" | "end" | "stretch" => {
+          if (v === "center") return "center";
+          if (v === "flex-end" || v === "end") return "end";
+          if (v === "stretch" || v === "normal") return "stretch";
+          return "start";
+        };
+
+        const mapTextAlign = (v: string): "left" | "center" | "right" => {
+          if (v === "center") return "center";
+          if (v === "right" || v === "end") return "right";
+          return "left";
+        };
+
+        function traverse(el: Element, depth: number): LayoutNode | null {
+          if (nodeCount >= maxNodes || depth > maxDepth) return null;
+
+          const tag = el.tagName.toLowerCase();
+          if (skipTags.has(tag)) return null;
+
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+
+          if (style.display === "none" || style.visibility === "hidden") return null;
+          if (rect.width < 1 || rect.height < 1) return null;
+
+          // position: fixed/sticky 처리
+          // 전체 너비의 80% 이상이면 고정 헤더/네비로 간주하여 유지
+          // 그 외 작은 위젯(채팅, 쿠키 배너 등)은 제거
+          const position = style.position;
+          if (position === "fixed" || position === "sticky") {
+            if (rect.width < window.innerWidth * 0.8) return null;
+          }
+
+          // 뷰포트 밖 요소 건너뛰기
+          const scrollY = window.scrollY;
+          const absY = rect.top + scrollY;
+          if (absY + rect.height < -100 || absY > document.body.scrollHeight * 2) return null;
+
+          const id = nodeCount++;
+
+          // data-sg-id 태그 (이미지 캡처용)
+          el.setAttribute("data-sg-id", String(id));
+
+          // 레이아웃 모델 감지
+          const display = style.display;
+          const flexDir = style.flexDirection;
+
+          let layoutModel: string;
+          const hasVisibleChildren = el.children.length > 0;
+          const ownText = getOwnText(el);
+
+          if (display.includes("flex")) {
+            layoutModel = (flexDir === "column" || flexDir === "column-reverse") ? "flex-col" : "flex-row";
+          } else if (display.includes("grid")) {
+            layoutModel = "grid";
+          } else if (display === "inline" || display === "inline-block" || display === "initial" || display === "contents") {
+            layoutModel = hasVisibleChildren ? "inline" : "leaf";
+          } else {
+            // block/list-item 등
+            // 인라인 계열 태그인데 display가 명시적 inline이 아닌 경우도 인라인으로 처리
+            const inlineTags = new Set(["span", "a", "em", "strong", "b", "i", "u", "s", "small", "sub", "sup", "abbr", "code", "mark", "label"]);
+            if (inlineTags.has(tag) && !display.includes("block") && !display.includes("flex") && !display.includes("grid")) {
+              layoutModel = hasVisibleChildren ? "inline" : "leaf";
+            } else {
+              layoutModel = hasVisibleChildren ? "block" : "leaf";
+            }
+          }
+
+          // 텍스트만 있고 자식 요소가 없으면 leaf
+          if (!hasVisibleChildren && ownText) {
+            layoutModel = "leaf";
+          }
+
+          // gap 추출
+          const gap = parseFloat(style.gap) || parseFloat(style.rowGap) || 0;
+          const crossGap = parseFloat(style.columnGap) || 0;
+
+          // 크기 모드 추론
+          // getComputedStyle().width는 항상 px값을 반환하므로 신뢰할 수 없음
+          // 대신 부모 대비 요소 너비 비율과 레이아웃 모델로 판단
+          let widthMode: "fixed" | "fill" | "hug" = "hug";
+          let heightMode: "fixed" | "fill" | "hug" = "hug";
+
+          const flexGrow = parseFloat(style.flexGrow) || 0;
+          const parentEl = el.parentElement;
+          const parentRect = parentEl ? parentEl.getBoundingClientRect() : null;
+          const parentStyle = parentEl ? window.getComputedStyle(parentEl) : null;
+          const parentContentWidth = parentRect && parentStyle
+            ? parentRect.width - (parseFloat(parentStyle.paddingLeft) || 0) - (parseFloat(parentStyle.paddingRight) || 0)
+            : 0;
+
+          // 부모 콘텐츠 영역의 90% 이상을 차지하면 fill로 간주
+          const fillsParent = parentContentWidth > 0 && rect.width >= parentContentWidth * 0.9;
+
+          if (flexGrow >= 1) {
+            widthMode = "fill";
+          } else if (fillsParent) {
+            // 부모 너비를 거의 채우고 있음 → fill
+            widthMode = "fill";
+          } else if (display === "inline" || display === "inline-block") {
+            widthMode = "hug";
+          } else {
+            // block/flex/grid 레벨 요소: 부모를 못 채우면 고정 너비(max-width 등)
+            if (display === "block" || display === "list-item" || display === "flex" || display === "grid") {
+              if (parentContentWidth > 0 && rect.width < parentContentWidth * 0.9) {
+                // 부모보다 명확히 작음 → max-width 등으로 제한된 고정 너비
+                widthMode = "fixed";
+              } else {
+                widthMode = "fill";
+              }
+            }
+          }
+
+          // 높이 모드 추론
+          const parentContentHeight = parentRect && parentStyle
+            ? parentRect.height - (parseFloat(parentStyle.paddingTop) || 0) - (parseFloat(parentStyle.paddingBottom) || 0)
+            : 0;
+          const fillsParentHeight = parentContentHeight > 0 && rect.height >= parentContentHeight * 0.9;
+
+          if (style.height === "100%" || style.height === "-webkit-fill-available") {
+            heightMode = "fill";
+          } else if (fillsParentHeight) {
+            heightMode = "fill";
+          } else if (rect.height > 0 && !fillsParentHeight && parentContentHeight > 0 && rect.height < parentContentHeight * 0.9) {
+            // 부모보다 명확히 작고 높이가 있음 → 고정 높이
+            heightMode = "fixed";
+          }
+
+          // margin: auto 감지 (가운데 정렬)
+          // getComputedStyle()은 margin:auto를 px로 resolve하므로 여러 방법으로 감지
+          const marginLeft = style.marginLeft;
+          const marginRight = style.marginRight;
+          // 1) 인라인 스타일에서 auto 확인
+          const htmlEl = el as HTMLElement;
+          const inlineML = htmlEl.style?.marginLeft || "";
+          const inlineMR = htmlEl.style?.marginRight || "";
+          const inlineMargin = htmlEl.style?.margin || "";
+          const marginLeftAuto = inlineML === "auto" || style.marginLeft === "auto";
+          const marginRightAuto = inlineMR === "auto" || style.marginRight === "auto";
+          // 2) margin shorthand에 auto가 포함 (e.g., "0 auto", "0px auto")
+          const shorthandAuto = inlineMargin.includes("auto");
+          // 3) 위치 기반 감지: block 요소가 부모보다 좁고, 양쪽 여백이 거의 같으면 margin:auto
+          const mlPx = parseFloat(marginLeft) || 0;
+          const mrPx = parseFloat(marginRight) || 0;
+          const positionCentered = widthMode === "fixed" && mlPx > 4 && mrPx > 4 && Math.abs(mlPx - mrPx) < 4;
+          const isCentered = (marginLeftAuto && marginRightAuto) || shorthandAuto || positionCentered;
+
+          // 시각 스타일
+          const bgColor = rgbToHex(style.backgroundColor);
+          const brColor = rgbToHex(style.borderColor);
+          const brWidth = parseFloat(style.borderWidth) || 0;
+          const brRadius = parseFloat(style.borderRadius) || 0;
+          const bgImage = style.backgroundImage;
+          const hasBgImage = bgImage !== "none" && bgImage !== "";
+          const isGradient = hasBgImage && bgImage.includes("gradient");
+          const rawShadow = style.boxShadow;
+          const boxShadow = (rawShadow && rawShadow !== "none") ? rawShadow : null;
+          const opacity = parseFloat(style.opacity) || 1;
+          const overflow = style.overflow;
+
+          // 이미지 여부
+          const isImage = tag === "img" || tag === "svg" || (hasBgImage && !isGradient);
+          const imageSrc = tag === "img" ? el.getAttribute("src") : null;
+
+          // 텍스트 스타일
+          const hasText = ownText !== null && layoutModel === "leaf";
+          const fsRaw = parseFloat(style.fontSize);
+          const lhRaw = style.lineHeight;
+
+          // 자식 순회 (텍스트 노드도 포함)
+          const children: any[] = [];
+          if (hasVisibleChildren && layoutModel !== "leaf") {
+            // 혼합 콘텐츠 감지: 요소 자식과 텍스트 노드가 공존하는 경우
+            // el.childNodes를 순회하여 텍스트 노드도 synthetic leaf로 생성
+            const hasMixedContent = ownText !== null && el.children.length > 0;
+
+            if (hasMixedContent) {
+              // childNodes 순회: 텍스트 노드 + 요소 노드 모두 처리
+              for (let i = 0; i < el.childNodes.length; i++) {
+                const childNode = el.childNodes[i];
+                if (childNode.nodeType === Node.TEXT_NODE) {
+                  const txt = (childNode.textContent || "").trim();
+                  if (txt.length === 0) continue;
+                  // synthetic text leaf 노드 생성
+                  const syntheticId = nodeCount++;
+                  const fsRawSynthetic = parseFloat(style.fontSize);
+                  const lhRawSynthetic = style.lineHeight;
+                  children.push({
+                    id: syntheticId,
+                    tag: "#text",
+                    role: null,
+                    layoutModel: "leaf",
+                    gap: 0, crossGap: 0, flexWrap: false,
+                    mainAxisAlign: "start", crossAxisAlign: "stretch",
+                    width: 0, // Auto Layout에서 HUG으로 처리됨
+                    height: 0,
+                    widthMode: "hug", heightMode: "hug",
+                    paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
+                    marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+                    backgroundColor: null, borderColor: null, borderWidth: 0, borderRadius: 0,
+                    boxShadow: null, gradient: null, opacity: 1, overflow: "visible",
+                    textContent: txt.slice(0, 300),
+                    fontFamily: style.fontFamily,
+                    fontSize: fsRawSynthetic,
+                    fontWeight: parseInt(style.fontWeight, 10),
+                    lineHeight: lhRawSynthetic === "normal" ? Math.round(fsRawSynthetic * 1.2) : parseFloat(lhRawSynthetic),
+                    letterSpacing: style.letterSpacing === "normal" ? 0 : parseFloat(style.letterSpacing),
+                    textColor: rgbToHex(style.color),
+                    textAlign: mapTextAlign(style.textAlign),
+                    isImage: false, imageSrc: null, isCentered: false, children: [],
+                  });
+                } else if (childNode.nodeType === Node.ELEMENT_NODE) {
+                  const child = traverse(childNode as Element, depth + 1);
+                  if (child) children.push(child);
+                }
+              }
+            } else {
+              // 기존 방식: 요소 자식만 순회
+              for (let i = 0; i < el.children.length; i++) {
+                const child = traverse(el.children[i], depth + 1);
+                if (child) children.push(child);
+              }
+            }
+          }
+
+          // 자식이 모두 필터링된 경우 leaf로 변경
+          if (children.length === 0 && layoutModel !== "leaf") {
+            if (ownText) {
+              layoutModel = "leaf";
+            } else if (!isImage && !bgColor && !brWidth && !hasBgImage && !boxShadow) {
+              return null; // 시각적으로 의미 없는 빈 노드 제거
+            }
+          }
+
+          return {
+            id,
+            tag,
+            role: semanticRoles.has(tag) ? tag : (el.getAttribute("role") || null),
+            layoutModel: layoutModel as any,
+            gap: layoutModel === "flex-row" ? (parseFloat(style.columnGap) || gap) : gap,
+            crossGap: layoutModel === "flex-row" ? (parseFloat(style.rowGap) || 0) : crossGap,
+            flexWrap: style.flexWrap === "wrap" || style.flexWrap === "wrap-reverse",
+            mainAxisAlign: mapJustify(style.justifyContent),
+            crossAxisAlign: mapAlign(style.alignItems),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            widthMode,
+            heightMode,
+            paddingTop: parseFloat(style.paddingTop) || 0,
+            paddingRight: parseFloat(style.paddingRight) || 0,
+            paddingBottom: parseFloat(style.paddingBottom) || 0,
+            paddingLeft: parseFloat(style.paddingLeft) || 0,
+            marginTop: parseFloat(style.marginTop) || 0,
+            marginRight: parseFloat(style.marginRight) || 0,
+            marginBottom: parseFloat(style.marginBottom) || 0,
+            marginLeft: parseFloat(style.marginLeft) || 0,
+            backgroundColor: bgColor,
+            borderColor: brWidth > 0 ? brColor : null,
+            borderWidth: brWidth,
+            borderRadius: brRadius,
+            boxShadow,
+            gradient: isGradient ? bgImage : null,
+            opacity,
+            overflow,
+            textContent: hasText ? ownText : null,
+            fontFamily: hasText ? style.fontFamily : null,
+            fontSize: hasText ? fsRaw : null,
+            fontWeight: hasText ? parseInt(style.fontWeight, 10) : null,
+            lineHeight: hasText ? (lhRaw === "normal" ? Math.round(fsRaw * 1.2) : parseFloat(lhRaw)) : null,
+            letterSpacing: hasText ? (style.letterSpacing === "normal" ? 0 : parseFloat(style.letterSpacing)) : null,
+            textColor: hasText ? rgbToHex(style.color) : null,
+            textAlign: mapTextAlign(style.textAlign),
+            isImage,
+            imageSrc,
+            isCentered,
+            children,
+          };
+        }
+
+        const body = document.body;
+        const tree = traverse(body, 0);
+
+        if (!tree) {
+          return {
+            id: 0, tag: "body", role: null, layoutModel: "flex-col",
+            gap: 0, crossGap: 0, flexWrap: false,
+            mainAxisAlign: "start", crossAxisAlign: "stretch",
+            width: 1920, height: 1080,
+            widthMode: "fixed", heightMode: "hug",
+            paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
+            marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+            backgroundColor: "#ffffff", borderColor: null, borderWidth: 0, borderRadius: 0,
+            boxShadow: null, gradient: null, opacity: 1, overflow: "visible",
+            textContent: null, fontFamily: null, fontSize: null, fontWeight: null,
+            lineHeight: null, letterSpacing: null, textColor: null, textAlign: "left",
+            isImage: false, imageSrc: null, isCentered: false, children: [],
+          };
+        }
+
+        return tree;
+      },
+      MAX_SEMANTIC_NODES,
+      MAX_SEMANTIC_DEPTH
+    );
+
+    // 5) 트리 후처리: wrapper 제거 + block→flex-col 변환
+    function simplifyTree(node: LayoutNode): LayoutNode {
+      // 먼저 자식들을 재귀적으로 정리
+      node.children = node.children.map(simplifyTree);
+
+      // 의미 없는 wrapper 제거: 자식이 1개이고 시각 스타일이 없는 non-semantic 노드
+      // 보존 조건: 정렬 속성, margin:auto, gap 등 레이아웃에 영향을 주는 속성이 있으면 제거하지 않음
+      while (
+        node.children.length === 1 &&
+        !node.role &&
+        !node.backgroundColor &&
+        !node.borderWidth &&
+        !node.boxShadow &&
+        !node.gradient &&
+        !node.textContent &&
+        !node.isImage &&
+        !node.children[0].isCentered &&
+        node.crossAxisAlign === "stretch" &&
+        node.mainAxisAlign === "start" &&
+        node.gap === 0 &&
+        node.paddingTop === 0 && node.paddingRight === 0 &&
+        node.paddingBottom === 0 && node.paddingLeft === 0
+      ) {
+        const child = node.children[0];
+        // 자식의 크기 모드 보존: fixed인 자식을 fill로 덮어쓰지 않음
+        if (node.widthMode === "fill" && child.widthMode === "hug") child.widthMode = "fill";
+        if (node.heightMode === "fill" && child.heightMode === "hug") child.heightMode = "fill";
+        node = child;
+      }
+
+      // block 컨테이너를 flex-col로 변환 (자식 간 gap 추론)
+      if (node.layoutModel === "block" && node.children.length > 1) {
+        node.layoutModel = "flex-col";
+
+        // gap은 이미 page.evaluate에서 계산 불가 → 0 유지
+        // (향후 개선: 자식 간 실제 간격 측정)
+      }
+
+      // grid를 flex-row wrap으로 단순화 (v1)
+      if (node.layoutModel === "grid") {
+        node.layoutModel = "flex-row";
+        node.flexWrap = true;
+      }
+
+      // inline 컨테이너를 flex-row로 변환
+      if (node.layoutModel === "inline" && node.children.length > 0) {
+        node.layoutModel = "flex-row";
+      }
+
+      return node;
+    }
+
+    const tree = simplifyTree(rawTree as LayoutNode);
+
+    // 6) 이미지 캡처: data-sg-id 기반
+    const imageNodes: LayoutNode[] = [];
+    function collectImageNodes(node: LayoutNode) {
+      if (node.isImage) imageNodes.push(node);
+      for (const child of node.children) collectImageNodes(child);
+    }
+    collectImageNodes(tree);
+
+    const MAX_IMG_CAPTURES = 50;
+    const toCapture = imageNodes.slice(0, MAX_IMG_CAPTURES);
+
+    for (const imgNode of toCapture) {
+      try {
+        const handle = await page.$(`[data-sg-id="${imgNode.id}"]`);
+        if (handle) {
+          const box = await handle.boundingBox();
+          if (box && box.width > 2 && box.height > 2) {
+            const buf = await handle.screenshot({ type: "jpeg", quality: 60, encoding: "base64" }) as string;
+            imgNode.imageData = buf;
+          }
+        }
+      } catch (_) { /* 개별 캡처 실패 무시 */ }
+    }
+
+    return { layoutTree: tree };
   } finally {
     await browser.close();
   }

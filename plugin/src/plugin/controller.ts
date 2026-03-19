@@ -1,4 +1,4 @@
-import { renderTables, renderCleanedTables, renderCaptureForSession, renderLayout, renderAILayout } from "./tableRenderer";
+import { renderTables, renderCleanedTables, renderCaptureForSession, renderLayout, renderAILayout, renderSemanticLayout } from "./tableRenderer";
 import type { PluginMessage, ExtractResult } from "../types";
 
 figma.showUI(__html__, { width: 420, height: 520 });
@@ -31,12 +31,15 @@ figma.ui.onmessage = async (msg: any) => {
 
     var layoutMode = msg.layoutMode || false;
     var aiLayoutMode = msg.aiLayoutMode || false;
+    var semanticLayoutMode = msg.semanticLayoutMode || false;
 
-    console.log("[StyleGrabber] successCount:", successCount, "layoutMode:", layoutMode, "aiLayoutMode:", aiLayoutMode, "cleanedOnly:", cleanedOnly);
+    console.log("[StyleGrabber] successCount:", successCount, "layoutMode:", layoutMode, "aiLayoutMode:", aiLayoutMode, "semanticLayoutMode:", semanticLayoutMode, "cleanedOnly:", cleanedOnly);
 
     if (successCount > 0) {
       try {
-        if (aiLayoutMode) {
+        if (semanticLayoutMode) {
+          await renderSemanticLayout(results);
+        } else if (aiLayoutMode) {
           await renderAILayout(results);
         } else if (layoutMode) {
           await renderLayout(results);

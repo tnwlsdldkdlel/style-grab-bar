@@ -124,6 +124,71 @@ export interface LayoutElement {
   imageData?: string;
 }
 
+// Semantic Layout: 레이아웃 모델 타입
+export type LayoutModel = "flex-row" | "flex-col" | "grid" | "block" | "inline" | "leaf";
+
+// Semantic Layout: 재귀적 레이아웃 노드
+export interface LayoutNode {
+  id: number;
+  tag: string;
+  role: string | null;          // 시맨틱 역할: "nav", "header", "main", "footer", "section", "article"
+  layoutModel: LayoutModel;
+
+  // Flex/Grid 속성
+  gap: number;
+  crossGap: number;
+  flexWrap: boolean;
+  mainAxisAlign: "start" | "center" | "end" | "space-between";
+  crossAxisAlign: "start" | "center" | "end" | "stretch";
+
+  // 크기
+  width: number;
+  height: number;
+  widthMode: "fixed" | "fill" | "hug";
+  heightMode: "fixed" | "fill" | "hug";
+
+  // 간격
+  paddingTop: number;
+  paddingRight: number;
+  paddingBottom: number;
+  paddingLeft: number;
+  marginTop: number;
+  marginRight: number;
+  marginBottom: number;
+  marginLeft: number;
+
+  // 시각 스타일
+  backgroundColor: string | null;
+  borderColor: string | null;
+  borderWidth: number;
+  borderRadius: number;
+  boxShadow: string | null;
+  gradient: string | null;
+  opacity: number;
+  overflow: string;
+
+  // 텍스트 (리프 텍스트 노드용)
+  textContent: string | null;
+  fontFamily: string | null;
+  fontSize: number | null;
+  fontWeight: number | null;
+  lineHeight: number | null;
+  letterSpacing: number | null;
+  textColor: string | null;
+  textAlign: "left" | "center" | "right";
+
+  // 이미지
+  isImage: boolean;
+  imageSrc: string | null;
+  imageData?: string;
+
+  // 정렬
+  isCentered: boolean;       // margin: 0 auto 등으로 가운데 정렬된 요소
+
+  // 트리 구조
+  children: LayoutNode[];
+}
+
 export interface ExtractResult {
   url: string;
   success: boolean;
@@ -141,4 +206,5 @@ export interface ExtractResult {
   aiScreenshot?: string;
   pageWidth?: number;
   pageHeight?: number;
+  layoutTree?: LayoutNode;
 }

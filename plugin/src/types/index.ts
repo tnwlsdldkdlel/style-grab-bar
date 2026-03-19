@@ -124,6 +124,63 @@ export interface LayoutElement {
   imageData?: string;
 }
 
+// Semantic Layout: 레이아웃 모델 타입
+export type LayoutModel = "flex-row" | "flex-col" | "grid" | "block" | "inline" | "leaf";
+
+// Semantic Layout: 재귀적 레이아웃 노드
+export interface LayoutNode {
+  id: number;
+  tag: string;
+  role: string | null;
+  layoutModel: LayoutModel;
+
+  gap: number;
+  crossGap: number;
+  flexWrap: boolean;
+  mainAxisAlign: "start" | "center" | "end" | "space-between";
+  crossAxisAlign: "start" | "center" | "end" | "stretch";
+
+  width: number;
+  height: number;
+  widthMode: "fixed" | "fill" | "hug";
+  heightMode: "fixed" | "fill" | "hug";
+
+  paddingTop: number;
+  paddingRight: number;
+  paddingBottom: number;
+  paddingLeft: number;
+  marginTop: number;
+  marginRight: number;
+  marginBottom: number;
+  marginLeft: number;
+
+  backgroundColor: string | null;
+  borderColor: string | null;
+  borderWidth: number;
+  borderRadius: number;
+  boxShadow: string | null;
+  gradient: string | null;
+  opacity: number;
+  overflow: string;
+
+  textContent: string | null;
+  fontFamily: string | null;
+  fontSize: number | null;
+  fontWeight: number | null;
+  lineHeight: number | null;
+  letterSpacing: number | null;
+  textColor: string | null;
+  textAlign: "left" | "center" | "right";
+
+  isImage: boolean;
+  imageSrc: string | null;
+  imageData?: string;
+
+  isCentered: boolean;
+
+  children: LayoutNode[];
+}
+
 export interface ExtractResult {
   url: string;
   success: boolean;
@@ -141,6 +198,7 @@ export interface ExtractResult {
   aiScreenshot?: string;
   pageWidth?: number;
   pageHeight?: number;
+  layoutTree?: LayoutNode;
 }
 
 export interface AILayoutElement {
@@ -163,5 +221,5 @@ export type PluginMessage =
   | { type: "extract"; urls: string[]; layoutMode?: boolean; aiLayoutMode?: boolean }
   | { type: "progress"; current: number; total: number; url: string }
   | { type: "result"; result: ExtractResult }
-  | { type: "done"; results: ExtractResult[]; cleanedOnly?: boolean; layoutMode?: boolean; aiLayoutMode?: boolean }
+  | { type: "done"; results: ExtractResult[]; cleanedOnly?: boolean; layoutMode?: boolean; aiLayoutMode?: boolean; semanticLayoutMode?: boolean }
   | { type: "screenshot-chunk"; url: string; data: string; chunkIndex: number; totalChunks: number };

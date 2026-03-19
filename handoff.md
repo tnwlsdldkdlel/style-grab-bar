@@ -97,10 +97,45 @@
 
 ---
 
+## 7. Semantic Layout (Auto Layout) 모드
+
+절대 좌표 배치 대신 Figma Auto Layout으로 웹 레이아웃을 재구성하는 모드.
+
+### 핵심 구조
+
+- `server/src/services/parser.ts` — `parseSemanticLayout()`: 재귀 DFS로 DOM → `LayoutNode` 트리 변환
+- `plugin/src/plugin/tableRenderer.ts` — `renderSemanticLayout()` / `renderNode()`: LayoutNode → Figma Auto Layout 프레임
+- `server/src/routes/extract.ts` — `POST /api/extract-semantic-layout` 엔드포인트
+- `plugin/src/ui/App.tsx` — "Auto Layout" 모드 라디오 버튼 추가
+
+### CSS → Figma 매핑
+
+| CSS | Figma |
+|-----|-------|
+| `display:flex` direction | `layoutMode: HORIZONTAL/VERTICAL` |
+| `gap` | `itemSpacing` |
+| `justify-content: space-between` | `primaryAxisAlignItems: SPACE_BETWEEN` |
+| `align-items: center` | `counterAxisAlignItems: CENTER` |
+| `margin: 0 auto` | 부모 `counterAxisAlignItems: CENTER` + 자식 FIXED width |
+| `flex-wrap: wrap` + gap | `layoutWrap: WRAP` + `counterAxisSpacing` |
+| 부모 대비 90%+ 너비 | `layoutSizingHorizontal: FILL` |
+| `linear-gradient()` (var() fallback, rgba alpha 포함) | `GRADIENT_LINEAR` paint |
+
+### 주요 해결한 문제들
+
+- **widthMode 감지**: `getComputedStyle().width`는 항상 px → 부모 콘텐츠 영역 대비 비율로 fill/fixed/hug 판단
+- **simplifyTree 래퍼 제거 시 정렬 손실**: `crossAxisAlign`, `mainAxisAlign`, `gap`, `isCentered` 보존 조건 추가
+- **텍스트 누락 (혼합 콘텐츠)**: `<p>텍스트<span>자식</span>텍스트</p>` 구조에서 직접 텍스트 노드가 버려짐 → `childNodes` 순회하여 synthetic text leaf 생성
+- **`display: initial`**: 인라인 태그(`span`, `a`, `em` 등)가 block으로 잘못 처리됨 → 태그 기반 인라인 감지 추가
+- **margin:auto 감지 강화**: 인라인 스타일 + shorthand + 위치 기반(양쪽 margin 동일) 3중 감지
+- **gradient 파싱 개선**: `var()` fallback 색상 추출, `rgba(.5)` alpha 처리, 중첩 괄호 파싱
+
+---
+
 ## 알려진 제한사항
 
 - **폰트**: Figma에 설치되지 않은 웹폰트는 Inter로 fallback되며, 속성 그리드에 "(fallback)" 표시
 - **이미지**: `<img>` 최대 30개까지 캡쳐 (JPEG quality 50), 나머지는 플레이스홀더
-- **타입 동기화**: `LayoutElement`가 `server/src/types`와 `plugin/src/types` 양쪽에 수동 정의 — 변경 시 양쪽 동기화 필요
+- **타입 동기화**: `LayoutElement`/`LayoutNode`가 `server/src/types`와 `plugin/src/types` 양쪽에 수동 정의 — 변경 시 양쪽 동기화 필요
 - **Layout 모드**: 최대 500개 요소, DOM 깊이 12단계 제한
-- **미지원 CSS**: transform, pseudo-elements(::before/::after), gradient, box-shadow는 추출되지 않음
+- **미지원 CSS**: transform, pseudo-elements(::before/::after)

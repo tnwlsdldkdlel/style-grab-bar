@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { parseTypography, parseLayout } from "../services/parser";
+import { parseTypography, parseLayout, parseSemanticLayout } from "../services/parser";
 import { parseLayoutWithAI } from "../services/aiLayout";
 import type { ExtractResult } from "../types";
 
@@ -39,6 +39,19 @@ extractRouter.post("/extract-layout", validateUrl, async (req, res) => {
   try {
     const { layoutElements } = await parseLayout(url);
     const result: ExtractResult = { url, success: true, layoutElements };
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    const result: ExtractResult = { url, success: false, error: message };
+    res.json(result);
+  }
+});
+
+extractRouter.post("/extract-semantic-layout", validateUrl, async (req, res) => {
+  const { url } = req.body;
+  try {
+    const { layoutTree } = await parseSemanticLayout(url);
+    const result: ExtractResult = { url, success: true, layoutTree };
     res.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

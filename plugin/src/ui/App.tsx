@@ -11,7 +11,7 @@ function App() {
   const [progress, setProgress] = useState({ current: 0, total: 0, url: "" });
   const [results, setResults] = useState<ExtractResult[]>([]);
   const [cleanedOnly, setCleanedOnly] = useState(false);
-  const [mode, setMode] = useState<"style" | "layout" | "ai-layout">("style");
+  const [mode, setMode] = useState<"style" | "layout" | "ai-layout" | "semantic-layout">("style");
 
   const handleExtract = useCallback(async () => {
     const urlList = urls
@@ -27,7 +27,10 @@ function App() {
 
     const isLayout = mode === "layout";
     const isAILayout = mode === "ai-layout";
-    const endpoint = isAILayout
+    const isSemanticLayout = mode === "semantic-layout";
+    const endpoint = isSemanticLayout
+      ? "/api/extract-semantic-layout"
+      : isAILayout
       ? "/api/extract-layout-ai"
       : isLayout
       ? "/api/extract-layout"
@@ -60,7 +63,13 @@ function App() {
 
     console.log("[UI] posting done message. mode:", mode, "resultCount:", allResults.length, "successes:", allResults.filter(r => r.success).length);
 
-    if (isAILayout) {
+    if (isSemanticLayout) {
+      // Semantic Layout 모드
+      parent.postMessage(
+        { pluginMessage: { type: "done", results: allResults, semanticLayoutMode: true } },
+        "*"
+      );
+    } else if (isAILayout) {
       // AI Layout 모드
       parent.postMessage(
         { pluginMessage: { type: "done", results: allResults, aiLayoutMode: true } },
@@ -151,6 +160,28 @@ function App() {
             gap: 4,
             cursor: "pointer",
             userSelect: "none",
+            color: mode === "semantic-layout" ? "#e85d04" : "#555",
+            fontWeight: mode === "semantic-layout" ? 600 : 400,
+          }}
+        >
+          <input
+            type="radio"
+            name="mode"
+            value="semantic-layout"
+            checked={mode === "semantic-layout"}
+            onChange={() => setMode("semantic-layout")}
+            disabled={isProcessing}
+            style={{ margin: 0, cursor: "pointer" }}
+          />
+          Auto Layout
+        </label>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            cursor: "pointer",
+            userSelect: "none",
             color: mode === "layout" ? "#7b61ff" : "#555",
             fontWeight: mode === "layout" ? 600 : 400,
           }}
@@ -164,7 +195,7 @@ function App() {
             disabled={isProcessing}
             style={{ margin: 0, cursor: "pointer" }}
           />
-          Layout Reconstruction
+          Layout (Legacy)
         </label>
         <label
           style={{
@@ -231,7 +262,7 @@ function App() {
           marginTop: 8,
           width: "100%",
           padding: "8px 0",
-          backgroundColor: isProcessing ? "#ccc" : mode === "ai-layout" ? "#10a37f" : mode === "layout" ? "#7b61ff" : cleanedOnly ? "#7b61ff" : "#18a0fb",
+          backgroundColor: isProcessing ? "#ccc" : mode === "semantic-layout" ? "#e85d04" : mode === "ai-layout" ? "#10a37f" : mode === "layout" ? "#7b61ff" : cleanedOnly ? "#7b61ff" : "#18a0fb",
           color: "#fff",
           border: "none",
           borderRadius: 4,
@@ -242,6 +273,8 @@ function App() {
       >
         {isProcessing
           ? "추출 중..."
+          : mode === "semantic-layout"
+          ? "Auto Layout 추출 시작"
           : mode === "ai-layout"
           ? "AI 레이아웃 추출 시작"
           : mode === "layout"
